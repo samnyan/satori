@@ -2,6 +2,8 @@ import * as QQGuild from '@qq-guild-sdk/core'
 import { Bot, Context, Schema, segment } from '@satorijs/satori'
 import { adaptGuild, adaptUser } from './utils'
 import { WsClient } from './ws'
+import {Message} from '@qq-guild-sdk/core/src';
+import axios from 'axios';
 
 export class QQGuildBot<C extends Context = Context> extends Bot<C, QQGuildBot.Config> {
   internal: QQGuild.Bot
@@ -20,22 +22,73 @@ export class QQGuildBot<C extends Context = Context> extends Bot<C, QQGuildBot.C
   }
 
   async sendMessage(channelId: string, content: string, guildId?: string) {
+    const segs = segment.parse(content)
+    const payload: Message.Request = {}
+
+    let text = ''
+    for (let seg of segs) {
+      switch (seg.type) {
+        case 'text':
+          text += seg.data.content
+          break
+        case 'at': {
+          if (seg.data.type === 'all') {
+            text += '@everyone'
+          } else if (seg.data.id) {
+            text += `<@${seg.data.id}>`
+          }
+          break
+        }
+        case 'image': {
+          if (seg.data.url) {
+            payload.image = seg.data.url
+          }
+          break
+        }
+        case 'quote':
+          payload.messageReference = { messageId: seg.data.id, ignoreGetMessageError: true }
+      }
+    }
+    if (text != '') {
+      payload.content = text
+    }
+
+
+    let [ subtype, srcMessageId, targetId ] = channelId.split(':')
+    if (subtype == 'channel') subtype = 'group'
+
+    payload.msgId = srcMessageId
+
     const session = this.session({
       channelId,
       content,
       guildId,
       author: this,
       type: 'send',
-      subtype: 'group',
+      subtype,
     })
 
     if (await this.context.serial(session, 'before-send', session)) return
     if (!session?.content) return []
-    const resp = await this.internal.send.channel(channelId, session.content)
-    session.messageId = resp.id
-    this.context.emit(session, 'send', session)
-    this.context.emit(session, 'message', this.adaptMessage(resp))
-    return [resp.id]
+
+    let resp: Message
+    try {
+      if (subtype == 'private') {
+        resp = await this.internal.dm(targetId).messages.add(payload)
+      } else {
+        resp = await this.internal.channel(targetId).messages.add(payload)
+      }
+
+      session.messageId = resp.id
+      this.context.emit(session, 'send', session)
+      this.context.emit(session, 'message', this.adaptMessage(resp))
+      return [resp.id]
+    } catch (e) {
+      if (axios.isAxiosError(e)) {
+        console.error(e)
+      }
+      return []
+    }
   }
 
   async getGuildList() {
@@ -43,7 +96,7 @@ export class QQGuildBot<C extends Context = Context> extends Bot<C, QQGuildBot.C
   }
 
   adaptMessage(msg: QQGuild.Message) {
-    const { id: messageId, author, guildId, channelId, timestamp } = msg
+    const { id: messageId, author, guildId, channelId, timestamp, srcGuildId } = msg
     const session = this.session({
       type: 'message',
       guildId,
@@ -54,8 +107,15 @@ export class QQGuildBot<C extends Context = Context> extends Bot<C, QQGuildBot.C
     session.author = adaptUser(msg.author)
     session.userId = author.id
     session.guildId = msg.guildId
-    session.channelId = msg.channelId
-    session.subtype = 'group'
+    if (srcGuildId) {
+      // Is private message
+      session.subtype = 'private'
+      session.channelId = `private:${messageId}:${msg.guildId}` // Private message doesn't have channel
+    } else {
+      session.subtype = 'group'
+      session.channelId = `channel:${messageId}:${msg.channelId}`
+    }
+
     session.content = (msg.content ?? '')
       .replace(/<@!(.+)>/, (_, $1) => segment.at($1))
       .replace(/<#(.+)>/, (_, $1) => segment.sharp($1))
