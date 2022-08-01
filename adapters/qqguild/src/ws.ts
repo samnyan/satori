@@ -1,5 +1,7 @@
-import { Adapter, Schema } from '@satorijs/satori'
+import {Adapter, Logger, Schema} from '@satorijs/satori'
 import { QQGuildBot } from './bot'
+
+const logger = new Logger('qqguild')
 
 export class WsClient extends Adapter.Client<QQGuildBot> {
   async start(bot: QQGuildBot) {
@@ -10,6 +12,7 @@ export class WsClient extends Adapter.Client<QQGuildBot> {
       const session = bot.adaptMessage(msg)
       if (session) bot.dispatch(session)
     })
+    bot.internal.on('error', error => logger.error(error))
   }
 
   async stop(bot: QQGuildBot) {
